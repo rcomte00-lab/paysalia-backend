@@ -119,8 +119,6 @@ async function generateGardenDesign(analysis, preferences, inspiration, apiKey) 
       prompt: prompt.slice(0, 3900), // limite DALL-E 3 : 4000 caractères
       n: 1,
       size: '1792x1024',
-      quality: 'standard',
-      style: 'vivid',
     }),
   });
 
