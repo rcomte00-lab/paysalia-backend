@@ -1,47 +1,13 @@
 // ============================================================================
-//  Paysalia — Backend IA (Vercel Serverless Function)
-//  Zéro dépendance : utilise fetch() natif de Node 18+, aucun npm install.
+//  Paysalia — Backend IA v3 (Vercel Serverless Function)
+//  Vision : remplacer un paysagiste — analyse de site, palette végétale
+//  régionale détaillée, conseils de pro, devis chiffré, rendu photo réaliste.
 //
-//  Flux : photo -> GPT-4o-mini (analyse) -> DALL-E 3 (1 image) -> budget calculé
-//  Optimisé pour : rester sous la limite 60s de Vercel + économiser les crédits.
+//  Optimisations : analyse et image générées EN PARALLÈLE (Promise.all)
+//  pour tenir largement sous la limite de 60s de Vercel.
 // ============================================================================
 
 const OPENAI = 'https://api.openai.com/v1';
-
-// ─── Base de prix (matériaux, plantes, main d'œuvre) ───
-const PRICE_DATABASE = {
-  lavender: { unitPrice: 8.5, unit: 'plant', category: 'plant' },
-  olive_tree: { unitPrice: 120, unit: 'tree', category: 'plant' },
-  stone_pavers: { unitPrice: 45, unit: 'm2', category: 'material' },
-  terracotta_planters: { unitPrice: 35, unit: 'unit', category: 'material' },
-  irrigation_system: { unitPrice: 680, unit: 'system', category: 'structure' },
-  raised_bed: { unitPrice: 85, unit: 'unit', category: 'structure' },
-  tomato_plants: { unitPrice: 4.5, unit: 'plant', category: 'plant' },
-  lettuce_mix: { unitPrice: 2.5, unit: 'plant', category: 'plant' },
-  herb_collection: { unitPrice: 5, unit: 'plant', category: 'plant' },
-  potting_soil: { unitPrice: 120, unit: 'm3', category: 'material' },
-  feature_boulders: { unitPrice: 180, unit: 'unit', category: 'material' },
-  bamboo: { unitPrice: 65, unit: 'plant', category: 'plant' },
-  japanese_maple: { unitPrice: 280, unit: 'tree', category: 'plant' },
-  raked_gravel: { unitPrice: 55, unit: 'm2', category: 'material' },
-  wooden_bridge: { unitPrice: 650, unit: 'unit', category: 'structure' },
-  moss_ground_cover: { unitPrice: 35, unit: 'm2', category: 'plant' },
-  stepping_stones: { unitPrice: 28, unit: 'unit', category: 'material' },
-  wisteria: { unitPrice: 45, unit: 'plant', category: 'plant' },
-  gravel_border: { unitPrice: 25, unit: 'm2', category: 'material' },
-  planting_labor: { unitPrice: 450, unit: 'project', category: 'labor' },
-  design_labor: { unitPrice: 1200, unit: 'project', category: 'labor' },
-  installation_labor: { unitPrice: 350, unit: 'project', category: 'labor' },
-};
-
-const PREFERENCE_ITEMS = {
-  edible: ['raised_bed', 'tomato_plants', 'lettuce_mix', 'herb_collection', 'potting_soil', 'planting_labor'],
-  flowering: ['lavender', 'wisteria', 'potting_soil', 'planting_labor', 'gravel_border'],
-  structural: ['stone_pavers', 'gravel_border', 'feature_boulders', 'stepping_stones', 'installation_labor'],
-  woodwork: ['wooden_bridge', 'wisteria', 'planting_labor'],
-  zen: ['bamboo', 'japanese_maple', 'raked_gravel', 'feature_boulders', 'moss_ground_cover', 'stepping_stones', 'design_labor'],
-  cottage: ['lavender', 'wisteria', 'stone_pavers', 'gravel_border', 'planting_labor'],
-};
 
 const PREF_TEXT = {
   edible: 'potager comestible avec legumes, herbes aromatiques et arbres fruitiers',
@@ -52,28 +18,20 @@ const PREF_TEXT = {
   cottage: 'jardin cottage anglais romantique avec bordures fleuries',
 };
 
-// Visuels locaux pour la grille (évite 4 générations DALL-E coûteuses et lentes).
-// Ces chemins existent déjà dans le frontend (public/assets/).
-const GRID_ASSETS = [
-  '/assets/design-cottage.jpg',
-  '/assets/design-zen.jpg',
-  '/assets/design-pergola.jpg',
-  '/assets/design-mediterranean.jpg',
-];
-
-// ─── 1. Analyse de la photo (GPT-4o-mini vision) ───
-// GPT-4o interprète RÉELLEMENT la photo + les styles voulus, et propose
-// lui-même les plantes, matériaux et main d'œuvre adaptés, avec quantités et prix.
-async function analyzeGardenPhoto(imageBase64, preferences, inspiration, budgetRange, apiKey) {
+// ─── 1. Analyse paysagiste complète (GPT-4o-mini vision) ───
+// Joue le rôle du paysagiste-conseil : lit la photo, croise avec la région
+// et les envies du client, et livre un dossier complet.
+async function analyzeGardenPhoto(imageBase64, preferences, inspiration, budgetRange, location, apiKey) {
   const prefText = (preferences || []).map((p) => PREF_TEXT[p] || p).join(', ') || 'jardin polyvalent';
   const budgetHint = { low: 'budget serré', medium: 'budget moyen', high: 'budget confortable', luxury: 'budget haut de gamme' }[budgetRange] || 'budget moyen';
+  const locText = location ? `Le client se situe à/en : ${location}. Adapte TOUT (climat, plantes, périodes) à cette localisation précise. ` : "Déduis la région/le climat probable des indices visibles (végétation, architecture, lumière). ";
 
   const r = await fetch(`${OPENAI}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
       model: 'gpt-4o-mini',
-      max_tokens: 1600,
+      max_tokens: 2500,
       messages: [
         {
           role: 'user',
@@ -81,25 +39,32 @@ async function analyzeGardenPhoto(imageBase64, preferences, inspiration, budgetR
             {
               type: 'text',
               text:
-                "Tu es un paysagiste-conseil expert. Regarde ATTENTIVEMENT cette photo précise et interprète l'espace réel (taille, sol, exposition, éléments existants, pente, murs, accès). " +
-                `Le client souhaite ce style : ${prefText}. ${inspiration ? `Inspiration du client : ${inspiration}. ` : ''}Contrainte : ${budgetHint}. ` +
-                "En te basant sur CE que tu vois vraiment dans la photo (pas des généralités), propose un aménagement chiffré et réaliste avec des prix du marché français en euros. " +
-                "Retourne UNIQUEMENT un JSON valide (aucun texte autour) avec EXACTEMENT cette structure :\n" +
+                "Tu es un paysagiste-conseil français expérimenté. Ton client n'a PAS de paysagiste : ton analyse doit être aussi complète et professionnelle que celle d'un vrai bureau d'études paysager. " +
+                "Regarde ATTENTIVEMENT cette photo précise : sol, exposition, pente, murs, accès, végétation existante, contraintes. " +
+                locText +
+                `Souhaits du client : ${prefText}. ${inspiration ? `Inspiration exprimée : ${inspiration}. ` : ''}Contrainte budgétaire : ${budgetHint}. ` +
+                "Réponds en FRANÇAIS. Retourne UNIQUEMENT un JSON valide (aucun texte autour) avec EXACTEMENT cette structure :\n" +
                 '{' +
-                '"soilDrainage":"ce que tu observes du sol",' +
-                '"exposure":"South-facing/North-facing/East-facing/West-facing selon la lumière visible",' +
+                '"soilDrainage":"observation du sol sur la photo",' +
+                '"exposure":"exposition déduite (ex: Sud-ouest)",' +
                 '"slope":"pente observée",' +
-                '"climateZone":"zone Köppen probable",' +
+                '"climateZone":"climat de la région (ex: Méditerranéen, Océanique, Semi-continental...)",' +
+                '"region":"région déduite ou fournie",' +
+                '"hardinessZone":"zone de rusticité USDA estimée (ex: 8b)",' +
                 '"sunHours":7.5,' +
                 '"windExposure":"exposition au vent observée",' +
                 '"detectedElements":["éléments réellement visibles sur la photo"],' +
-                '"recommendedStyle":"style retenu",' +
+                '"constraints":["contraintes du terrain à prendre en compte"],' +
+                '"recommendedStyle":"style retenu et pourquoi en une phrase",' +
                 '"estimatedArea":50,' +
-                '"plants":[{"name":"nom de plante adapté","quantity":6,"unit":"plant","unitPrice":8.5}],' +
+                '"designConcept":"2-3 phrases : le concept d\'aménagement proposé, comme le ferait un paysagiste à son client",' +
+                '"plants":[{"name":"nom courant","latinName":"nom latin","quantity":6,"unit":"plant","unitPrice":8.5,"sunNeeds":"plein soleil/mi-ombre/ombre","waterNeeds":"faible/modéré/important","floweringPeriod":"ex: juin-septembre","plantingPeriod":"ex: mars-avril ou octobre","careLevel":"facile/modéré/exigeant","careTip":"un conseil d\'entretien concret en une phrase","whyHere":"pourquoi cette plante est adaptée à CE terrain et CE climat, une phrase"}],' +
                 '"materials":[{"name":"matériau/structure","quantity":15,"unit":"m2","unitPrice":25}],' +
-                '"labor":[{"name":"poste de main d\'œuvre","quantity":1,"unit":"projet","unitPrice":800}]' +
+                '"labor":[{"name":"poste de main d\'œuvre","quantity":1,"unit":"projet","unitPrice":800}],' +
+                '"proTips":["3 à 5 conseils de paysagiste concrets et personnalisés pour CE projet (ordre des travaux, saison idéale, erreurs à éviter, arrosage...)"],' +
+                '"maintenanceCalendar":[{"period":"Printemps","tasks":"tâches principales"},{"period":"Été","tasks":"..."},{"period":"Automne","tasks":"..."},{"period":"Hiver","tasks":"..."}]' +
                 '}\n' +
-                "estimatedArea en m2. Propose 4 à 7 plantes VARIÉES et cohérentes avec ce que tu vois et le style, 2 à 4 matériaux/structures, 1 à 2 postes de main d'œuvre. Adapte les quantités à la surface estimée. Prix réalistes.",
+                "IMPORTANT : 5 à 8 plantes VARIÉES, réellement adaptées au climat de la région ET à ce que tu observes (exposition, sol, pente). Prix du marché français réalistes en euros. Quantités cohérentes avec la surface estimée.",
             },
             { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imageBase64}` } },
           ],
@@ -119,22 +84,21 @@ async function analyzeGardenPhoto(imageBase64, preferences, inspiration, budgetR
   return JSON.parse(match ? match[0] : '{}');
 }
 
-// ─── 2. Transformation de la photo (gpt-image-1 en mode édition) ───
-// Prend la VRAIE photo du client et la réaménage en gardant le lieu, la
-// perspective, la maison et les murs — pour un vrai "avant/après" projeté.
-async function generateGardenDesign(analysis, preferences, inspiration, apiKey, imageBase64) {
-  const prefText = (preferences || []).map((p) => PREF_TEXT[p] || p).join(', ');
+// ─── 2. Transformation de la photo (gpt-image-1 édition) ───
+// Indépendante de l'analyse → peut tourner EN PARALLÈLE.
+async function generateGardenDesign(preferences, inspiration, apiKey, imageBase64) {
+  const prefText = (preferences || []).map((p) => PREF_TEXT[p] || p).join(', ') || 'beautiful versatile garden';
 
   const editPrompt =
-    'Transform this outdoor space into a beautifully landscaped garden. ' +
-    'Keep the EXACT same viewpoint, camera angle, perspective and lighting as the original photo. ' +
-    'Keep all existing architecture unchanged: house, walls, fences, boundaries, buildings in the background. ' +
+    'Transform this outdoor space into a stunning, professionally landscaped garden. ' +
+    'CRITICAL: keep the EXACT same viewpoint, camera angle, perspective, and all existing architecture ' +
+    '(house, walls, stairs, fences, background buildings) unchanged. ' +
     `Redesign only the garden and ground areas with: ${prefText}. ` +
     (inspiration ? `Client wish: ${inspiration}. ` : '') +
-    'Photorealistic professional landscape design rendering, lush, inviting and realistic, ' +
-    'so the client can visualize the real transformation of their own space. High quality, natural daylight.';
+    'Golden hour lighting, lush healthy plants, magazine-quality photorealistic landscape rendering, ' +
+    'harmonious colors, inviting atmosphere. The client must recognize their own space, beautifully transformed.';
 
-  // ── Tentative 1 : édition de la vraie photo (le rendu souhaité) ──
+  // Tentative 1 : édition de la vraie photo
   try {
     const buffer = Buffer.from(imageBase64, 'base64');
     const form = new FormData();
@@ -147,7 +111,7 @@ async function generateGardenDesign(analysis, preferences, inspiration, apiKey, 
 
     const r = await fetch(`${OPENAI}/images/edits`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}` }, // FormData gère le Content-Type
+      headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
     });
 
@@ -163,13 +127,12 @@ async function generateGardenDesign(analysis, preferences, inspiration, apiKey, 
     console.error('Erreur édition photo:', e && e.message);
   }
 
-  // ── Tentative 2 (secours) : génération d'une esquisse à partir de zéro ──
+  // Tentative 2 (secours) : génération from scratch
   const genPrompt =
-    'Professional photorealistic landscape design rendering of a garden. ' +
-    `A ${analysis.estimatedArea || 50}m2 ${(analysis.exposure || '').toLowerCase()} outdoor space in ${analysis.climateZone || 'temperate'} climate. ` +
+    'Magazine-quality photorealistic landscape design rendering of a beautiful garden. ' +
     `Features: ${prefText}. ` +
-    (inspiration ? `Client wish: ${inspiration}. ` : '') +
-    'Lush, inviting, natural daylight, high quality.';
+    (inspiration ? `Style wish: ${inspiration}. ` : '') +
+    'Golden hour light, lush, inviting, professional.';
 
   const r2 = await fetch(`${OPENAI}/images/generations`, {
     method: 'POST',
@@ -187,10 +150,8 @@ async function generateGardenDesign(analysis, preferences, inspiration, apiKey, 
   throw new Error(`Génération image échouée : ${r2.status} ${(await r2.text()).slice(0, 200)}`);
 }
 
-// ─── 3. Calcul du budget à partir de ce que l'IA a proposé ───
-// Utilise les plantes / matériaux / main d'œuvre que GPT-4o a déduits de la photo.
-// Repli sur la table figée uniquement si l'IA n'a rien renvoyé d'exploitable.
-function generateBudget(analysis, preferences, budgetRange) {
+// ─── 3. Devis construit sur les propositions de l'IA ───
+function generateBudget(analysis) {
   const cleanList = (arr, category) =>
     (Array.isArray(arr) ? arr : [])
       .map((it) => {
@@ -209,34 +170,11 @@ function generateBudget(analysis, preferences, budgetRange) {
       })
       .filter(Boolean);
 
-  let items = [
+  const items = [
     ...cleanList(analysis.plants, 'plant'),
     ...cleanList(analysis.materials, 'material'),
     ...cleanList(analysis.labor, 'labor'),
   ];
-
-  // Repli : si l'IA n'a proposé aucun item, on utilise l'ancienne table figée.
-  if (items.length === 0) {
-    const area = analysis.estimatedArea || 50;
-    const multiplier = { low: 0.5, medium: 1, high: 2, luxury: 4 }[budgetRange] || 1;
-    const areaFactor = area / 50;
-    const itemIds = new Set();
-    (preferences || []).forEach((p) => (PREFERENCE_ITEMS[p] || []).forEach((id) => itemIds.add(id)));
-    itemIds.add('planting_labor');
-    if (area > 30) itemIds.add('irrigation_system');
-    items = Array.from(itemIds).map((id) => {
-      const price = PRICE_DATABASE[id];
-      const baseQty = id.includes('labor') ? 1 : Math.max(1, Math.ceil(2 * areaFactor));
-      const qty = Math.ceil(baseQty * multiplier);
-      return {
-        name: id.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase()),
-        quantity: `${qty} ${price.unit}`,
-        unitPrice: price.unitPrice,
-        totalPrice: Math.round(price.unitPrice * qty * 100) / 100,
-        category: price.category,
-      };
-    });
-  }
 
   const subtotal = items.reduce((s, i) => s + i.totalPrice, 0);
   const vatRate = 20;
@@ -259,20 +197,24 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // Vercel parse déjà req.body si Content-Type: application/json.
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
-    const { image, preferences, inspiration, budgetRange } = body;
+    const { image, preferences, inspiration, budgetRange, location } = body;
 
     if (!image) return res.status(400).json({ error: 'Image requise' });
 
-    const analysis = await analyzeGardenPhoto(image, preferences, inspiration, budgetRange, apiKey);
-    const mainImage = await generateGardenDesign(analysis, preferences, inspiration, apiKey, image);
-    const budget = generateBudget(analysis, preferences, budgetRange);
+    // Analyse ET image en PARALLÈLE : temps total = le plus lent des deux,
+    // au lieu de la somme. Gain de ~15-20 secondes.
+    const [analysis, mainImage] = await Promise.all([
+      analyzeGardenPhoto(image, preferences, inspiration, budgetRange, location, apiKey),
+      generateGardenDesign(preferences, inspiration, apiKey, image),
+    ]);
+
+    const budget = generateBudget(analysis);
 
     return res.status(200).json({
       success: true,
       analysis,
-      design: { mainImage, gridImages: GRID_ASSETS },
+      design: { mainImage, gridImages: [] },
       budget,
     });
   } catch (err) {
