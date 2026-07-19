@@ -98,7 +98,7 @@ async function analyzeGardenPhoto(imageBase64, apiKey) {
   return JSON.parse(match ? match[0] : '{}');
 }
 
-// ─── 2. Génération du design (DALL-E 3, une seule image) ───
+// ─── 2. Génération du design (gpt-image-1, une seule image) ───
 async function generateGardenDesign(analysis, preferences, inspiration, apiKey) {
   const prefText = (preferences || []).map((p) => PREF_TEXT[p] || p).join(', ');
   const elements = (analysis.detectedElements || []).join(', ');
@@ -111,24 +111,43 @@ async function generateGardenDesign(analysis, preferences, inspiration, apiKey) 
     (elements ? `Incorporate existing elements: ${elements}. ` : '') +
     'Style: loose ink and watercolor washes, pencil underdrawing visible, botanical illustration, labeled plant positions, compass rose. Soft sage greens, lavender, terracotta tones. No text, no letters.';
 
-  const r = await fetch(`${OPENAI}/images/generations`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: 'dall-e-3',
-      prompt: prompt.slice(0, 3900), // limite DALL-E 3 : 4000 caractères
-      n: 1,
-      size: '1792x1024',
-    }),
-  });
+  // Essaie d'abord gpt-image-1 (nouveau modèle, accessible sur les comptes payants),
+  // puis dall-e-3 en secours si jamais gpt-image-1 n'est pas disponible.
+  const attempts = [
+    { model: 'gpt-image-1', size: '1536x1024' },
+    { model: 'dall-e-3', size: '1792x1024' },
+  ];
 
-  if (!r.ok) {
-    const err = await r.text();
-    throw new Error(`Génération (DALL-E) échouée : ${r.status} ${err.slice(0, 200)}`);
+  let lastErr = '';
+  for (const attempt of attempts) {
+    const r = await fetch(`${OPENAI}/images/generations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: attempt.model,
+        prompt: prompt.slice(0, 3900),
+        n: 1,
+        size: attempt.size,
+      }),
+    });
+
+    if (r.ok) {
+      const data = await r.json();
+      const item = data.data && data.data[0];
+      if (!item) { lastErr = 'Réponse image vide'; continue; }
+      // gpt-image-1 renvoie du base64 (b64_json) ; dall-e-3 renvoie une url.
+      if (item.b64_json) return `data:image/png;base64,${item.b64_json}`;
+      if (item.url) return item.url;
+      lastErr = 'Format image inattendu';
+      continue;
+    }
+
+    lastErr = `${r.status} ${(await r.text()).slice(0, 200)}`;
+    // Si le modèle n'est pas accessible, on passe au suivant ; sinon on arrête.
+    if (r.status !== 400 && r.status !== 403 && r.status !== 404) break;
   }
 
-  const data = await r.json();
-  return (data.data && data.data[0] && data.data[0].url) || '';
+  throw new Error(`Génération (image) échouée : ${lastErr}`);
 }
 
 // ─── 3. Calcul du budget ───
