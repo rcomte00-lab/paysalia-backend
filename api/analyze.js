@@ -62,13 +62,18 @@ const GRID_ASSETS = [
 ];
 
 // ─── 1. Analyse de la photo (GPT-4o-mini vision) ───
-async function analyzeGardenPhoto(imageBase64, apiKey) {
+// GPT-4o interprète RÉELLEMENT la photo + les styles voulus, et propose
+// lui-même les plantes, matériaux et main d'œuvre adaptés, avec quantités et prix.
+async function analyzeGardenPhoto(imageBase64, preferences, inspiration, budgetRange, apiKey) {
+  const prefText = (preferences || []).map((p) => PREF_TEXT[p] || p).join(', ') || 'jardin polyvalent';
+  const budgetHint = { low: 'budget serré', medium: 'budget moyen', high: 'budget confortable', luxury: 'budget haut de gamme' }[budgetRange] || 'budget moyen';
+
   const r = await fetch(`${OPENAI}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
       model: 'gpt-4o-mini',
-      max_tokens: 800,
+      max_tokens: 1600,
       messages: [
         {
           role: 'user',
@@ -76,9 +81,25 @@ async function analyzeGardenPhoto(imageBase64, apiKey) {
             {
               type: 'text',
               text:
-                "Tu es un paysagiste expert. Analyse cette photo d'espace exterieur et retourne UNIQUEMENT un JSON valide (aucun texte autour) avec cette structure exacte:\n" +
-                '{"soilDrainage":"description","exposure":"South-facing / North-facing / East-facing / West-facing","slope":"description","climateZone":"zone Köppen ex Temperate Cfb","sunHours":7.5,"windExposure":"description","detectedElements":["element1","element2"],"recommendedStyle":"style","estimatedArea":50}\n' +
-                'estimatedArea en m2. Sois precis et professionnel.',
+                "Tu es un paysagiste-conseil expert. Regarde ATTENTIVEMENT cette photo précise et interprète l'espace réel (taille, sol, exposition, éléments existants, pente, murs, accès). " +
+                `Le client souhaite ce style : ${prefText}. ${inspiration ? `Inspiration du client : ${inspiration}. ` : ''}Contrainte : ${budgetHint}. ` +
+                "En te basant sur CE que tu vois vraiment dans la photo (pas des généralités), propose un aménagement chiffré et réaliste avec des prix du marché français en euros. " +
+                "Retourne UNIQUEMENT un JSON valide (aucun texte autour) avec EXACTEMENT cette structure :\n" +
+                '{' +
+                '"soilDrainage":"ce que tu observes du sol",' +
+                '"exposure":"South-facing/North-facing/East-facing/West-facing selon la lumière visible",' +
+                '"slope":"pente observée",' +
+                '"climateZone":"zone Köppen probable",' +
+                '"sunHours":7.5,' +
+                '"windExposure":"exposition au vent observée",' +
+                '"detectedElements":["éléments réellement visibles sur la photo"],' +
+                '"recommendedStyle":"style retenu",' +
+                '"estimatedArea":50,' +
+                '"plants":[{"name":"nom de plante adapté","quantity":6,"unit":"plant","unitPrice":8.5}],' +
+                '"materials":[{"name":"matériau/structure","quantity":15,"unit":"m2","unitPrice":25}],' +
+                '"labor":[{"name":"poste de main d\'œuvre","quantity":1,"unit":"projet","unitPrice":800}]' +
+                '}\n' +
+                "estimatedArea en m2. Propose 4 à 7 plantes VARIÉES et cohérentes avec ce que tu vois et le style, 2 à 4 matériaux/structures, 1 à 2 postes de main d'œuvre. Adapte les quantités à la surface estimée. Prix réalistes.",
             },
             { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imageBase64}` } },
           ],
@@ -166,28 +187,56 @@ async function generateGardenDesign(analysis, preferences, inspiration, apiKey, 
   throw new Error(`Génération image échouée : ${r2.status} ${(await r2.text()).slice(0, 200)}`);
 }
 
-// ─── 3. Calcul du budget ───
-function generateBudget(area, preferences, budgetRange) {
-  const multiplier = { low: 0.5, medium: 1, high: 2, luxury: 4 }[budgetRange] || 1;
-  const areaFactor = (area || 50) / 50;
+// ─── 3. Calcul du budget à partir de ce que l'IA a proposé ───
+// Utilise les plantes / matériaux / main d'œuvre que GPT-4o a déduits de la photo.
+// Repli sur la table figée uniquement si l'IA n'a rien renvoyé d'exploitable.
+function generateBudget(analysis, preferences, budgetRange) {
+  const cleanList = (arr, category) =>
+    (Array.isArray(arr) ? arr : [])
+      .map((it) => {
+        const qty = Math.max(1, Math.round(Number(it.quantity) || 1));
+        const unitPrice = Math.max(0, Number(it.unitPrice) || 0);
+        const unit = (it.unit || 'u').toString();
+        const name = (it.name || '').toString().trim();
+        if (!name || unitPrice <= 0) return null;
+        return {
+          name,
+          quantity: `${qty} ${unit}`,
+          unitPrice: Math.round(unitPrice * 100) / 100,
+          totalPrice: Math.round(unitPrice * qty * 100) / 100,
+          category,
+        };
+      })
+      .filter(Boolean);
 
-  const itemIds = new Set();
-  (preferences || []).forEach((p) => (PREFERENCE_ITEMS[p] || []).forEach((id) => itemIds.add(id)));
-  itemIds.add('planting_labor');
-  if ((area || 50) > 30) itemIds.add('irrigation_system');
+  let items = [
+    ...cleanList(analysis.plants, 'plant'),
+    ...cleanList(analysis.materials, 'material'),
+    ...cleanList(analysis.labor, 'labor'),
+  ];
 
-  const items = Array.from(itemIds).map((id) => {
-    const price = PRICE_DATABASE[id];
-    const baseQty = id.includes('labor') ? 1 : Math.max(1, Math.ceil(2 * areaFactor));
-    const qty = Math.ceil(baseQty * multiplier);
-    return {
-      name: id.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase()),
-      quantity: `${qty} ${price.unit}`,
-      unitPrice: price.unitPrice,
-      totalPrice: Math.round(price.unitPrice * qty * 100) / 100,
-      category: price.category,
-    };
-  });
+  // Repli : si l'IA n'a proposé aucun item, on utilise l'ancienne table figée.
+  if (items.length === 0) {
+    const area = analysis.estimatedArea || 50;
+    const multiplier = { low: 0.5, medium: 1, high: 2, luxury: 4 }[budgetRange] || 1;
+    const areaFactor = area / 50;
+    const itemIds = new Set();
+    (preferences || []).forEach((p) => (PREFERENCE_ITEMS[p] || []).forEach((id) => itemIds.add(id)));
+    itemIds.add('planting_labor');
+    if (area > 30) itemIds.add('irrigation_system');
+    items = Array.from(itemIds).map((id) => {
+      const price = PRICE_DATABASE[id];
+      const baseQty = id.includes('labor') ? 1 : Math.max(1, Math.ceil(2 * areaFactor));
+      const qty = Math.ceil(baseQty * multiplier);
+      return {
+        name: id.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase()),
+        quantity: `${qty} ${price.unit}`,
+        unitPrice: price.unitPrice,
+        totalPrice: Math.round(price.unitPrice * qty * 100) / 100,
+        category: price.category,
+      };
+    });
+  }
 
   const subtotal = items.reduce((s, i) => s + i.totalPrice, 0);
   const vatRate = 20;
@@ -216,9 +265,9 @@ module.exports = async (req, res) => {
 
     if (!image) return res.status(400).json({ error: 'Image requise' });
 
-    const analysis = await analyzeGardenPhoto(image, apiKey);
+    const analysis = await analyzeGardenPhoto(image, preferences, inspiration, budgetRange, apiKey);
     const mainImage = await generateGardenDesign(analysis, preferences, inspiration, apiKey, image);
-    const budget = generateBudget(analysis.estimatedArea || 50, preferences, budgetRange);
+    const budget = generateBudget(analysis, preferences, budgetRange);
 
     return res.status(200).json({
       success: true,
