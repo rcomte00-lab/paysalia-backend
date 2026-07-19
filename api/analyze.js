@@ -98,56 +98,72 @@ async function analyzeGardenPhoto(imageBase64, apiKey) {
   return JSON.parse(match ? match[0] : '{}');
 }
 
-// ─── 2. Génération du design (gpt-image-1, une seule image) ───
-async function generateGardenDesign(analysis, preferences, inspiration, apiKey) {
+// ─── 2. Transformation de la photo (gpt-image-1 en mode édition) ───
+// Prend la VRAIE photo du client et la réaménage en gardant le lieu, la
+// perspective, la maison et les murs — pour un vrai "avant/après" projeté.
+async function generateGardenDesign(analysis, preferences, inspiration, apiKey, imageBase64) {
   const prefText = (preferences || []).map((p) => PREF_TEXT[p] || p).join(', ');
-  const elements = (analysis.detectedElements || []).join(', ');
 
-  const prompt =
-    'Professional watercolor landscape architect concept sketch on cream textured paper. ' +
-    `Garden design for a ${analysis.estimatedArea || 50}m2 ${(analysis.exposure || '').toLowerCase()} outdoor space in ${analysis.climateZone || 'temperate'} climate. ` +
-    `Features: ${prefText}. ` +
-    (inspiration ? `Client inspiration: ${inspiration}. ` : '') +
-    (elements ? `Incorporate existing elements: ${elements}. ` : '') +
-    'Style: loose ink and watercolor washes, pencil underdrawing visible, botanical illustration, labeled plant positions, compass rose. Soft sage greens, lavender, terracotta tones. No text, no letters.';
+  const editPrompt =
+    'Transform this outdoor space into a beautifully landscaped garden. ' +
+    'Keep the EXACT same viewpoint, camera angle, perspective and lighting as the original photo. ' +
+    'Keep all existing architecture unchanged: house, walls, fences, boundaries, buildings in the background. ' +
+    `Redesign only the garden and ground areas with: ${prefText}. ` +
+    (inspiration ? `Client wish: ${inspiration}. ` : '') +
+    'Photorealistic professional landscape design rendering, lush, inviting and realistic, ' +
+    'so the client can visualize the real transformation of their own space. High quality, natural daylight.';
 
-  // Essaie d'abord gpt-image-1 (nouveau modèle, accessible sur les comptes payants),
-  // puis dall-e-3 en secours si jamais gpt-image-1 n'est pas disponible.
-  const attempts = [
-    { model: 'gpt-image-1', size: '1536x1024' },
-    { model: 'dall-e-3', size: '1792x1024' },
-  ];
+  // ── Tentative 1 : édition de la vraie photo (le rendu souhaité) ──
+  try {
+    const buffer = Buffer.from(imageBase64, 'base64');
+    const form = new FormData();
+    form.append('model', 'gpt-image-1');
+    form.append('image', new Blob([buffer], { type: 'image/jpeg' }), 'photo.jpg');
+    form.append('prompt', editPrompt.slice(0, 3900));
+    form.append('size', '1536x1024');
+    form.append('quality', 'medium');
+    form.append('n', '1');
 
-  let lastErr = '';
-  for (const attempt of attempts) {
-    const r = await fetch(`${OPENAI}/images/generations`, {
+    const r = await fetch(`${OPENAI}/images/edits`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: attempt.model,
-        prompt: prompt.slice(0, 3900),
-        n: 1,
-        size: attempt.size,
-      }),
+      headers: { Authorization: `Bearer ${apiKey}` }, // FormData gère le Content-Type
+      body: form,
     });
 
     if (r.ok) {
       const data = await r.json();
       const item = data.data && data.data[0];
-      if (!item) { lastErr = 'Réponse image vide'; continue; }
-      // gpt-image-1 renvoie du base64 (b64_json) ; dall-e-3 renvoie une url.
-      if (item.b64_json) return `data:image/png;base64,${item.b64_json}`;
-      if (item.url) return item.url;
-      lastErr = 'Format image inattendu';
-      continue;
+      if (item && item.b64_json) return `data:image/png;base64,${item.b64_json}`;
+      if (item && item.url) return item.url;
+    } else {
+      console.error('Édition photo échouée:', r.status, (await r.text()).slice(0, 200));
     }
-
-    lastErr = `${r.status} ${(await r.text()).slice(0, 200)}`;
-    // Si le modèle n'est pas accessible, on passe au suivant ; sinon on arrête.
-    if (r.status !== 400 && r.status !== 403 && r.status !== 404) break;
+  } catch (e) {
+    console.error('Erreur édition photo:', e && e.message);
   }
 
-  throw new Error(`Génération (image) échouée : ${lastErr}`);
+  // ── Tentative 2 (secours) : génération d'une esquisse à partir de zéro ──
+  const genPrompt =
+    'Professional photorealistic landscape design rendering of a garden. ' +
+    `A ${analysis.estimatedArea || 50}m2 ${(analysis.exposure || '').toLowerCase()} outdoor space in ${analysis.climateZone || 'temperate'} climate. ` +
+    `Features: ${prefText}. ` +
+    (inspiration ? `Client wish: ${inspiration}. ` : '') +
+    'Lush, inviting, natural daylight, high quality.';
+
+  const r2 = await fetch(`${OPENAI}/images/generations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model: 'gpt-image-1', prompt: genPrompt.slice(0, 3900), n: 1, size: '1536x1024' }),
+  });
+
+  if (r2.ok) {
+    const data = await r2.json();
+    const item = data.data && data.data[0];
+    if (item && item.b64_json) return `data:image/png;base64,${item.b64_json}`;
+    if (item && item.url) return item.url;
+  }
+
+  throw new Error(`Génération image échouée : ${r2.status} ${(await r2.text()).slice(0, 200)}`);
 }
 
 // ─── 3. Calcul du budget ───
@@ -201,7 +217,7 @@ module.exports = async (req, res) => {
     if (!image) return res.status(400).json({ error: 'Image requise' });
 
     const analysis = await analyzeGardenPhoto(image, apiKey);
-    const mainImage = await generateGardenDesign(analysis, preferences, inspiration, apiKey);
+    const mainImage = await generateGardenDesign(analysis, preferences, inspiration, apiKey, image);
     const budget = generateBudget(analysis.estimatedArea || 50, preferences, budgetRange);
 
     return res.status(200).json({
