@@ -107,3 +107,94 @@ async function generateGardenDesign(analysis, preferences, inspiration, apiKey) 
     'Professional watercolor landscape architect concept sketch on cream textured paper. ' +
     `Garden design for a ${analysis.estimatedArea || 50}m2 ${(analysis.exposure || '').toLowerCase()} outdoor space in ${analysis.climateZone || 'temperate'} climate. ` +
     `Features: ${prefText}. ` +
+    (inspiration ? `Client inspiration: ${inspiration}. ` : '') +
+    (elements ? `Incorporate existing elements: ${elements}. ` : '') +
+    'Style: loose ink and watercolor washes, pencil underdrawing visible, botanical illustration, labeled plant positions, compass rose. Soft sage greens, lavender, terracotta tones. No text, no letters.';
+
+  const r = await fetch(`${OPENAI}/images/generations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: 'dall-e-3',
+      prompt: prompt.slice(0, 3900), // limite DALL-E 3 : 4000 caractères
+      n: 1,
+      size: '1792x1024',
+      quality: 'standard',
+      style: 'vivid',
+    }),
+  });
+
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`Génération (DALL-E) échouée : ${r.status} ${err.slice(0, 200)}`);
+  }
+
+  const data = await r.json();
+  return (data.data && data.data[0] && data.data[0].url) || '';
+}
+
+// ─── 3. Calcul du budget ───
+function generateBudget(area, preferences, budgetRange) {
+  const multiplier = { low: 0.5, medium: 1, high: 2, luxury: 4 }[budgetRange] || 1;
+  const areaFactor = (area || 50) / 50;
+
+  const itemIds = new Set();
+  (preferences || []).forEach((p) => (PREFERENCE_ITEMS[p] || []).forEach((id) => itemIds.add(id)));
+  itemIds.add('planting_labor');
+  if ((area || 50) > 30) itemIds.add('irrigation_system');
+
+  const items = Array.from(itemIds).map((id) => {
+    const price = PRICE_DATABASE[id];
+    const baseQty = id.includes('labor') ? 1 : Math.max(1, Math.ceil(2 * areaFactor));
+    const qty = Math.ceil(baseQty * multiplier);
+    return {
+      name: id.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase()),
+      quantity: `${qty} ${price.unit}`,
+      unitPrice: price.unitPrice,
+      totalPrice: Math.round(price.unitPrice * qty * 100) / 100,
+      category: price.category,
+    };
+  });
+
+  const subtotal = items.reduce((s, i) => s + i.totalPrice, 0);
+  const vatRate = 20;
+  const vatAmount = Math.round(subtotal * (vatRate / 100) * 100) / 100;
+  return { items, subtotal: Math.round(subtotal * 100) / 100, vatRate, vatAmount, total: Math.round((subtotal + vatAmount) * 100) / 100 };
+}
+
+// ─── Handler principal ───
+module.exports = async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Méthode non autorisée' });
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'OPENAI_API_KEY manquante dans les variables d\'environnement Vercel' });
+  }
+
+  try {
+    // Vercel parse déjà req.body si Content-Type: application/json.
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+    const { image, preferences, inspiration, budgetRange } = body;
+
+    if (!image) return res.status(400).json({ error: 'Image requise' });
+
+    const analysis = await analyzeGardenPhoto(image, apiKey);
+    const mainImage = await generateGardenDesign(analysis, preferences, inspiration, apiKey);
+    const budget = generateBudget(analysis.estimatedArea || 50, preferences, budgetRange);
+
+    return res.status(200).json({
+      success: true,
+      analysis,
+      design: { mainImage, gridImages: GRID_ASSETS },
+      budget,
+    });
+  } catch (err) {
+    console.error('Erreur analyze:', err);
+    return res.status(500).json({ error: (err && err.message) || 'Génération impossible' });
+  }
+};
