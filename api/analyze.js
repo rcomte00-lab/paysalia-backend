@@ -21,10 +21,22 @@ const PREF_TEXT = {
 // ─── 1. Analyse paysagiste complète (GPT-4o-mini vision) ───
 // Joue le rôle du paysagiste-conseil : lit la photo, croise avec la région
 // et les envies du client, et livre un dossier complet.
-async function analyzeGardenPhoto(imageBase64, preferences, inspiration, budgetRange, location, apiKey) {
+async function analyzeGardenPhoto(imageBase64, opts, apiKey) {
+  const { preferences, inspiration, budgetRange, location, maintenanceLevel, usages, allergies, houseStyle } = opts || {};
+
   const prefText = (preferences || []).map((p) => PREF_TEXT[p] || p).join(', ') || 'jardin polyvalent';
   const budgetHint = { low: 'budget serré', medium: 'budget moyen', high: 'budget confortable', luxury: 'budget haut de gamme' }[budgetRange] || 'budget moyen';
   const locText = location ? `Le client se situe à/en : ${location}. Adapte TOUT (climat, plantes, périodes) à cette localisation précise. ` : "Déduis la région/le climat probable des indices visibles (végétation, architecture, lumière). ";
+
+  // ── Personnalisation avancée : ces contraintes doivent VRAIMENT filtrer les choix ──
+  const maintText = maintenanceLevel
+    ? `Niveau d'entretien souhaité : ${maintenanceLevel}/5 (1 = quasi-autonome, 5 = jardinier passionné). ${Number(maintenanceLevel) <= 2 ? "PRIVILÉGIE des plantes robustes, autonomes, peu d'arrosage et peu de taille." : Number(maintenanceLevel) >= 4 ? "Le client aime jardiner : tu peux proposer des végétaux plus exigeants et variés." : "Équilibre entre autonomie et plaisir de jardiner."} `
+    : '';
+  const usagesText = (usages && usages.length) ? `Usages prévus de l'espace : ${usages.join(', ')}. Adapte l'aménagement à ces usages (zones dédiées, circulation, mobilier suggéré). ` : '';
+  const allergyText = (allergies && allergies.length)
+    ? `CONTRAINTE IMPÉRATIVE — le client a ces sensibilités : ${allergies.join(', ')}. EXCLUS formellement toute plante à risque (fort pollen allergisant, plantes urticantes/toxiques si enfants ou animaux, plantes très mellifères si allergie aux piqûres). Mentionne dans "whyHere" que la plante est sûre pour ce profil. `
+    : '';
+  const houseText = houseStyle ? `Style architectural de la maison : ${houseStyle}. Recherche l'harmonie visuelle entre le jardin et ce style de maison. ` : '';
 
   const r = await fetch(`${OPENAI}/chat/completions`, {
     method: 'POST',
@@ -43,6 +55,7 @@ async function analyzeGardenPhoto(imageBase64, preferences, inspiration, budgetR
                 "Regarde ATTENTIVEMENT cette photo précise : sol, exposition, pente, murs, accès, végétation existante, contraintes. " +
                 locText +
                 `Souhaits du client : ${prefText}. ${inspiration ? `Inspiration exprimée : ${inspiration}. ` : ''}Contrainte budgétaire : ${budgetHint}. ` +
+                maintText + usagesText + allergyText + houseText +
                 "Réponds en FRANÇAIS. Retourne UNIQUEMENT un JSON valide (aucun texte autour) avec EXACTEMENT cette structure :\n" +
                 '{' +
                 '"soilDrainage":"observation du sol sur la photo",' +
@@ -57,6 +70,7 @@ async function analyzeGardenPhoto(imageBase64, preferences, inspiration, budgetR
                 '"constraints":["contraintes du terrain à prendre en compte"],' +
                 '"recommendedStyle":"style retenu et pourquoi en une phrase",' +
                 '"estimatedArea":50,' +
+                '"personalizationNotes":"1-2 phrases expliquant comment tu as pris en compte les contraintes du client (entretien, usages, allergies, style maison) — vide si aucune contrainte fournie",' +
                 '"designConcept":"2-3 phrases : le concept d\'aménagement proposé, comme le ferait un paysagiste à son client",' +
                 '"plants":[{"name":"nom courant","latinName":"nom latin","quantity":6,"unit":"plant","unitPrice":8.5,"sunNeeds":"plein soleil/mi-ombre/ombre","waterNeeds":"faible/modéré/important","floweringPeriod":"ex: juin-septembre","plantingPeriod":"ex: mars-avril ou octobre","careLevel":"facile/modéré/exigeant","careTip":"un conseil d\'entretien concret en une phrase","whyHere":"pourquoi cette plante est adaptée à CE terrain et CE climat, une phrase"}],' +
                 '"materials":[{"name":"matériau/structure","quantity":15,"unit":"m2","unitPrice":25}],' +
@@ -198,14 +212,14 @@ module.exports = async (req, res) => {
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
-    const { image, preferences, inspiration, budgetRange, location } = body;
+    const { image, preferences, inspiration, budgetRange, location, maintenanceLevel, usages, allergies, houseStyle } = body;
 
     if (!image) return res.status(400).json({ error: 'Image requise' });
 
-    // Analyse ET image en PARALLÈLE : temps total = le plus lent des deux,
-    // au lieu de la somme. Gain de ~15-20 secondes.
+    // Analyse ET image en PARALLÈLE : temps total = le plus lent des deux.
+    const analyzeOpts = { preferences, inspiration, budgetRange, location, maintenanceLevel, usages, allergies, houseStyle };
     const [analysis, mainImage] = await Promise.all([
-      analyzeGardenPhoto(image, preferences, inspiration, budgetRange, location, apiKey),
+      analyzeGardenPhoto(image, analyzeOpts, apiKey),
       generateGardenDesign(preferences, inspiration, apiKey, image),
     ]);
 
