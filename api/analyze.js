@@ -76,7 +76,7 @@ async function analyzeGardenPhoto(imageBase64, opts, apiKey) {
                 '"materials":[{"name":"matériau/structure","quantity":15,"unit":"m2","unitPrice":25}],' +
                 '"labor":[{"name":"poste de main d\'œuvre","quantity":1,"unit":"projet","unitPrice":800}],' +
                 '"proTips":["3 à 5 conseils de paysagiste concrets et personnalisés pour CE projet (ordre des travaux, saison idéale, erreurs à éviter, arrosage...)"],' +
-                '"maintenanceCalendar":[{"period":"Printemps","tasks":"tâches principales"},{"period":"Été","tasks":"..."},{"period":"Automne","tasks":"..."},{"period":"Hiver","tasks":"..."}]' +
+                '"maintenanceCalendar":[{"period":"Printemps","tasks":["tâche 1","tâche 2"]},{"period":"Été","tasks":["..."]},{"period":"Automne","tasks":["..."]},{"period":"Hiver","tasks":["..."]}]' +
                 '}\n' +
                 "IMPORTANT : 5 à 8 plantes VARIÉES, réellement adaptées au climat de la région ET à ce que tu observes (exposition, sol, pente). Prix du marché français réalistes en euros. Quantités cohérentes avec la surface estimée.",
             },
@@ -95,7 +95,21 @@ async function analyzeGardenPhoto(imageBase64, opts, apiKey) {
   const data = await r.json();
   const content = (data.choices && data.choices[0] && data.choices[0].message.content) || '{}';
   const match = content.match(/\{[\s\S]*\}/);
-  return JSON.parse(match ? match[0] : '{}');
+  const parsed = JSON.parse(match ? match[0] : '{}');
+
+  // Normalisation du calendrier : le frontend attend tasks sous forme de tableau.
+  // Si l'IA a renvoyé une chaîne ("tonte, paillage"), on la découpe en liste.
+  if (Array.isArray(parsed.maintenanceCalendar)) {
+    parsed.maintenanceCalendar = parsed.maintenanceCalendar.map((item) => {
+      let tasks = item.tasks ?? item.taches ?? [];
+      if (typeof tasks === 'string') {
+        tasks = tasks.split(/[,;•·\n]/).map((s) => s.trim()).filter(Boolean);
+      }
+      return { period: item.period || item.periode || '', tasks: Array.isArray(tasks) ? tasks : [] };
+    });
+  }
+
+  return parsed;
 }
 
 // ─── 2. Transformation de la photo (gpt-image-1 édition) ───
