@@ -114,7 +114,7 @@ async function analyzeGardenPhoto(imageBase64, opts, apiKey) {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
       model: 'gpt-4o-mini',
-      max_tokens: 2500,
+      max_tokens: 4000,
       messages: [
         {
           role: 'user',
@@ -147,9 +147,15 @@ async function analyzeGardenPhoto(imageBase64, opts, apiKey) {
                 '"materials":[{"name":"matériau/structure","quantity":15,"unit":"m2","unitPrice":25}],' +
                 '"labor":[{"name":"poste de main d\'œuvre","quantity":1,"unit":"projet","unitPrice":800}],' +
                 '"proTips":["3 à 5 conseils de paysagiste concrets et personnalisés pour CE projet (ordre des travaux, saison idéale, erreurs à éviter, arrosage...)"],' +
-                '"maintenanceCalendar":[{"period":"Printemps","tasks":["tâche 1","tâche 2"]},{"period":"Été","tasks":["..."]},{"period":"Automne","tasks":["..."]},{"period":"Hiver","tasks":["..."]}]' +
+                '"maintenanceCalendar":[{"period":"Printemps","tasks":["tâche 1","tâche 2"]},{"period":"Été","tasks":["..."]},{"period":"Automne","tasks":["..."]},{"period":"Hiver","tasks":["..."]}],' +
+                '"layoutPlan":{"description":"1 phrase décrivant l\'organisation générale","zones":[{"name":"nom de la zone (ex: Coin potager)","x":10,"y":15,"width":35,"height":30,"color":"#4c855a","content":"ce qu\'on y met (plantes/matériaux du projet)"}]},' +
+                '"workPhases":[{"phase":1,"title":"titre de l\'étape","season":"meilleure saison","duration":"durée estimée","tasks":["tâche concrète 1","tâche 2"],"diyLevel":"facile/modéré/pro recommandé"}],' +
+                '"shoppingList":[{"category":"Végétaux ou Matériaux ou Outillage","items":["article précis avec quantité"]}]' +
                 '}\n' +
-                "IMPORTANT : 5 à 8 plantes VARIÉES, réellement adaptées au climat de la région ET à ce que tu observes (exposition, sol, pente). Prix du marché français réalistes en euros. Quantités cohérentes avec la surface estimée.",
+                "IMPORTANT : 5 à 8 plantes VARIÉES, réellement adaptées au climat de la région ET à ce que tu observes (exposition, sol, pente). Prix du marché français réalistes en euros. Quantités cohérentes avec la surface estimée. " +
+                "POUR layoutPlan : positionne 3 à 6 zones sur un plan vu de dessus de l'espace, en te basant sur ce que tu vois dans la photo (x, y, width, height en POURCENTAGES de 0 à 100, sans chevauchement excessif). Utilise des couleurs parmi : #4c855a (végétal), #c4783f (terrasse/bois), #8b7ec7 (fleuri), #6b8fa3 (eau), #a0895c (allée/minéral). " +
+                "POUR workPhases : 3 à 5 phases dans l'ORDRE logique de chantier (préparation du sol AVANT plantation, structures AVANT végétaux...). " +
+                "POUR shoppingList : consolide TOUT ce qu'il faut acheter pour réaliser le projet, avec les quantités.",
             },
             { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imageBase64}` } },
           ],
