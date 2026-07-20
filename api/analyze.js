@@ -212,9 +212,17 @@ module.exports = async (req, res) => {
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
-    const { image, preferences, inspiration, budgetRange, location, maintenanceLevel, usages, allergies, houseStyle } = body;
+    const { image, preferences, inspiration, budgetRange, location } = body;
 
     if (!image) return res.status(400).json({ error: 'Image requise' });
+
+    // Les champs de perso peuvent arriver à plat OU groupés dans `personalization`.
+    // On accepte les deux formats pour rester compatible quelle que soit l'app.
+    const perso = body.personalization || {};
+    const maintenanceLevel = body.maintenanceLevel ?? perso.maintenanceLevel;
+    const usages = body.usages ?? perso.usages;
+    const allergies = body.allergies ?? perso.allergies;
+    const houseStyle = body.houseStyle ?? perso.houseStyle;
 
     // Analyse ET image en PARALLÈLE : temps total = le plus lent des deux.
     const analyzeOpts = { preferences, inspiration, budgetRange, location, maintenanceLevel, usages, allergies, houseStyle };
