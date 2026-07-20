@@ -9,6 +9,62 @@
 
 const OPENAI = 'https://api.openai.com/v1';
 
+// ─── Données climatiques réelles (Open-Meteo, gratuit, sans clé API) ───
+// Transforme une ville en coordonnées, puis récupère les vraies normales
+// climatiques (mini hivernal, pluviométrie) pour fiabiliser le choix des plantes.
+async function fetchClimateData(location) {
+  if (!location || !location.trim()) return null;
+
+  // Petit helper : fetch avec timeout, pour ne JAMAIS bloquer l'analyse si
+  // Open-Meteo est lent ou injoignable.
+  const fetchT = async (url, ms = 4000) => {
+    const ctrl = new AbortController();
+    const id = setTimeout(() => ctrl.abort(), ms);
+    try { return await fetch(url, { signal: ctrl.signal }); }
+    finally { clearTimeout(id); }
+  };
+
+  try {
+    // 1) Géocodage : "Aubenas" -> lat/lng
+    const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location.trim())}&count=1&language=fr`;
+    const geoRes = await fetchT(geoUrl);
+    if (!geoRes.ok) return null;
+    const geo = await geoRes.json();
+    const place = geo.results && geo.results[0];
+    if (!place) return null;
+    const { latitude, longitude, name, admin1, country } = place;
+
+    // 2) Normales climatiques sur ~10 ans (température min quotidienne, précipitations)
+    const start = '2014-01-01', end = '2023-12-31';
+    const archUrl = `https://archive-api.open-meteo.com/v1/archive?latitude=${latitude}&longitude=${longitude}&start_date=${start}&end_date=${end}&daily=temperature_2m_min,precipitation_sum&timezone=auto`;
+    const archRes = await fetchT(archUrl, 5000);
+    if (!archRes.ok) return { latitude, longitude, place: [name, admin1, country].filter(Boolean).join(', ') };
+    const arch = await archRes.json();
+
+    const mins = (arch.daily && arch.daily.temperature_2m_min) || [];
+    const precs = (arch.daily && arch.daily.precipitation_sum) || [];
+    const absoluteMin = mins.length ? Math.min(...mins.filter((v) => v !== null)) : null;
+    const avgAnnualPrecip = precs.length ? Math.round(precs.filter((v) => v !== null).reduce((a, b) => a + b, 0) / 10) : null;
+
+    // 3) Zone de rusticité USDA à partir du mini absolu (°C)
+    const usda = absoluteMin === null ? null : (
+      absoluteMin >= -1 ? '10' : absoluteMin >= -7 ? '9' : absoluteMin >= -12 ? '8' :
+      absoluteMin >= -18 ? '7' : absoluteMin >= -23 ? '6' : absoluteMin >= -29 ? '5' : '4'
+    );
+
+    return {
+      latitude, longitude,
+      place: [name, admin1, country].filter(Boolean).join(', '),
+      winterMinC: absoluteMin !== null ? Math.round(absoluteMin) : null,
+      annualPrecipMm: avgAnnualPrecip,
+      hardinessZone: usda,
+    };
+  } catch (e) {
+    console.error('Climat Open-Meteo indisponible:', e && e.message);
+    return null;
+  }
+}
+
 const PREF_TEXT = {
   edible: 'potager comestible avec legumes, herbes aromatiques et arbres fruitiers',
   flowering: 'jardin fleuri avec rosiers, lavande, pivoines et fleurs saisonnieres',
@@ -22,11 +78,26 @@ const PREF_TEXT = {
 // Joue le rôle du paysagiste-conseil : lit la photo, croise avec la région
 // et les envies du client, et livre un dossier complet.
 async function analyzeGardenPhoto(imageBase64, opts, apiKey) {
-  const { preferences, inspiration, budgetRange, location, maintenanceLevel, usages, allergies, houseStyle } = opts || {};
+  const { preferences, inspiration, budgetRange, location, maintenanceLevel, usages, allergies, houseStyle, climate } = opts || {};
 
   const prefText = (preferences || []).map((p) => PREF_TEXT[p] || p).join(', ') || 'jardin polyvalent';
   const budgetHint = { low: 'budget serré', medium: 'budget moyen', high: 'budget confortable', luxury: 'budget haut de gamme' }[budgetRange] || 'budget moyen';
-  const locText = location ? `Le client se situe à/en : ${location}. Adapte TOUT (climat, plantes, périodes) à cette localisation précise. ` : "Déduis la région/le climat probable des indices visibles (végétation, architecture, lumière). ";
+
+  // Si on a de vraies données climatiques, on les donne à l'IA comme FAITS
+  // vérifiés — elle ne devine plus, elle s'appuie dessus.
+  let locText;
+  if (climate) {
+    locText =
+      `DONNÉES CLIMATIQUES RÉELLES pour ${climate.place} (source météo, à respecter impérativement) : ` +
+      (climate.winterMinC !== null ? `température minimale hivernale observée ≈ ${climate.winterMinC}°C ; ` : '') +
+      (climate.hardinessZone ? `zone de rusticité USDA ${climate.hardinessZone} ; ` : '') +
+      (climate.annualPrecipMm ? `pluviométrie annuelle ≈ ${climate.annualPrecipMm} mm. ` : '') +
+      `Ne propose QUE des plantes qui survivent à ${climate.winterMinC !== null ? climate.winterMinC + '°C' : 'ce climat'} et adaptées à cette pluviométrie. `;
+  } else if (location) {
+    locText = `Le client se situe à/en : ${location}. Adapte TOUT (climat, plantes, périodes) à cette localisation précise. `;
+  } else {
+    locText = "Déduis la région/le climat probable des indices visibles (végétation, architecture, lumière). ";
+  }
 
   // ── Personnalisation avancée : ces contraintes doivent VRAIMENT filtrer les choix ──
   const maintText = maintenanceLevel
@@ -238,14 +309,28 @@ module.exports = async (req, res) => {
     const allergies = body.allergies ?? perso.allergies;
     const houseStyle = body.houseStyle ?? perso.houseStyle;
 
-    // Analyse ET image en PARALLÈLE : temps total = le plus lent des deux.
-    const analyzeOpts = { preferences, inspiration, budgetRange, location, maintenanceLevel, usages, allergies, houseStyle };
+    // Le climat réel fiabilise les plantes, mais n'est jamais bloquant : s'il
+    // échoue ou tarde (timeouts internes de 4-5s), l'analyse se fait sans lui.
+    const climate = await fetchClimateData(location).catch(() => null);
+
+    // Analyse (nourrie du climat réel si dispo) ET image en PARALLÈLE.
+    const analyzeOpts = { preferences, inspiration, budgetRange, location, maintenanceLevel, usages, allergies, houseStyle, climate };
     const [analysis, mainImage] = await Promise.all([
       analyzeGardenPhoto(image, analyzeOpts, apiKey),
       generateGardenDesign(preferences, inspiration, apiKey, image),
     ]);
 
     const budget = generateBudget(analysis);
+
+    // On fait remonter les vraies données climatiques dans l'analyse : elles
+    // priment sur ce que l'IA aurait estimé (affichage "climat vérifié").
+    if (climate) {
+      if (climate.hardinessZone) analysis.hardinessZone = climate.hardinessZone;
+      if (climate.place) analysis.region = climate.place;
+      analysis.climateVerified = true;
+      analysis.winterMinC = climate.winterMinC;
+      analysis.annualPrecipMm = climate.annualPrecipMm;
+    }
 
     return res.status(200).json({
       success: true,
